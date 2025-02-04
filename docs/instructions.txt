@@ -1,8 +1,0 @@
-ทำ web crawler
-1. ใช้ coding อันนี้เป็นตัวแม่ https://github.com/spider-rs/spider/blob/main/examples/cache_chrome_hybrid.rs
-2. ใช้เว็บไซต์ https://heygoody.com/ เป็นหลัก
-3. ให้เขียน spider ไป crawl sitemap มาก่อนเท่านั้น !!!!
-4. หลังจาก crawl sitemap มาเสร็จแล้วให้ใช้ให้ loop ลิงก์ท่ได้จาก sitemap เพื่อจะได้ html แล้วแปลงให้เป็น markdown
-5. จากข้อที่ [4] ให้สามารถปรับ mode ได้เป็น httprequest/chrome
-6. จากข้อ [5] crawler ต้องฉลาดพอแยก SPA,SSR ด้วย ถัาเป็น SPA ระบบใช้ chrome, SSR ใช้ http request
-7. ทั้งหมดต้องใช้ผ่าน lib spider rs ทั้งหมดห้ามใช้ lib ด้านนอกเลย
