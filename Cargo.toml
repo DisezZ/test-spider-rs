@@ -5,5 +5,5 @@ edition = "2021"
 
 [dependencies]
 fast_html2md = "0.0.44"
-spider = { version = "2.27.31", features = ["sitemap", "smart"] }
+spider = { version = "2.27.31", features = ["cache", "sitemap", "smart"] }
 tokio = { version = "1.43.0", features = ["full"] }
