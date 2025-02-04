@@ -23,11 +23,9 @@ enum CrawlerMode {
 }
 
 // Implement a crawler that do these thing in order
-// 1. Craw the sitemap first
-// 2. Loop the link and parse from html to markdown
-// And able to do all of those by auto determine whether to use
-// HTTP request or Chrome headless rendering based on whether
-// the website is SSR or SPA
+// 1. Determine whether site is SPA or SSR and create crawler accordingly
+// 2. Craw the sitemap first
+// 3. Loop the link and parse from html to markdown
 #[tokio::main]
 async fn main() {
     let target = "https://www.heygoody.com/";
