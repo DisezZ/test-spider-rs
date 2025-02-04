@@ -22,7 +22,7 @@ async fn main() {
     let mut website = Website::new(target)
         .with_respect_robots_txt(false)
         .with_user_agent(Some("SpiderBot"))
-        // .with_ignore_sitemap(true) // ignore running the sitemap on base crawl/scape methods. Remove or set to true to include the sitemap with the crawl.
+        .with_ignore_sitemap(true) // ignore running the sitemap on base crawl/scape methods. Remove or set to true to include the sitemap with the crawl.
         .with_sitemap(Some("sitemap.xml"))
         .with_chrome_intercept(RequestInterceptConfiguration::new(true))
         .with_depth(10)
