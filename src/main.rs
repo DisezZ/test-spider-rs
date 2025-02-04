@@ -4,11 +4,23 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::spider::tokio::io::AsyncWriteExt;
 use spider::features::chrome_common::RequestInterceptConfiguration;
-use spider::tokio;
 use spider::website::Website;
+use spider::{reqwest, tokio};
 use spider_transformations::transformation::content;
 
 static GLOBAL_URL_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+#[derive(Debug)]
+enum WebsiteType {
+    SSR,
+    SPA,
+}
+
+#[derive(Debug)]
+enum CrawlerMode {
+    HTTPReq,
+    Chrome,
+}
 
 // Implement a crawler that do these thing in order
 // 1. Craw the sitemap first
@@ -19,18 +31,30 @@ static GLOBAL_URL_COUNT: AtomicUsize = AtomicUsize::new(0);
 #[tokio::main]
 async fn main() {
     let target = "https://www.heygoody.com/";
-    let mut website = Website::new(target)
-        .with_respect_robots_txt(false)
-        .with_user_agent(Some("SpiderBot"))
-        .with_ignore_sitemap(true) // ignore running the sitemap on base crawl/scape methods. Remove or set to true to include the sitemap with the crawl.
-        .with_sitemap(Some("sitemap.xml"))
-        .with_chrome_intercept(RequestInterceptConfiguration::new(true))
-        .with_depth(10)
-        .with_limit(100)
-        .with_stealth(true)
-        .build()
-        .unwrap();
 
+    // determine crawler mode from whether website is SPA or SSR
+    let crawler_mode = match determine_ssr_or_spa(target).await {
+        WebsiteType::SSR => CrawlerMode::HTTPReq,
+        WebsiteType::SPA => CrawlerMode::Chrome,
+    };
+    println!("DEBUG: Crawler operate in {:?} mode", crawler_mode);
+
+    // construct website struct based on crawler mode
+    let mut binding = Website::new(target);
+    let website = binding
+        .with_respect_robots_txt(true)
+        .with_user_agent(Some("SpiderBot"))
+        .with_stealth(true);
+    let website = match crawler_mode {
+        CrawlerMode::HTTPReq => website,
+        CrawlerMode::Chrome => {
+            website.with_chrome_intercept(RequestInterceptConfiguration::new(true))
+        }
+    };
+    let mut website = website.build().unwrap();
+    println!("DEBUG: Crawler operate with {:?}", &website);
+
+    // get start time
     let start = std::time::Instant::now();
 
     // first and foremost, we crawl the sitemap
@@ -45,12 +69,13 @@ async fn main() {
             tokio::task::spawn(async move {
                 let _ = stdout.write_all(b"\n\n#### ==== ####\n").await;
 
-                let _ = stdout.write_all(res.get_url().as_bytes()).await;
+                let _ = stdout
+                    .write_all(format!("{:?} => {}\n", GLOBAL_URL_COUNT, res.get_url()).as_bytes())
+                    .await;
 
                 // get html and parse it into markdown
                 let markdown = parse_html_to_markdown(&res.get_html());
-
-                let _ = stdout.write_all(markdown.as_bytes()).await;
+                let _ = stdout.write_all(format!("{}\n", markdown).as_bytes()).await;
 
                 GLOBAL_URL_COUNT.fetch_add(1, Ordering::Relaxed);
             });
@@ -80,6 +105,21 @@ async fn main() {
         "Time elapsed in website.crawl() is: {:?} for total pages: {:?}",
         duration, GLOBAL_URL_COUNT
     )
+}
+
+// simple func to determine whtether a website is SSR or SPA, currently based on a simple
+// factor, which is whether the initial response from the site is include script or not.
+// currently:
+// include => SPA
+// !include => SSR
+async fn determine_ssr_or_spa(url: &str) -> WebsiteType {
+    let res = reqwest::get(url).await.unwrap();
+    let html = res.text().await.unwrap();
+    if html.contains("<script>") {
+        WebsiteType::SPA
+    } else {
+        WebsiteType::SSR
+    }
 }
 
 fn parse_html_to_markdown(html: &String) -> String {
