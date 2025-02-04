@@ -1,39 +1,39 @@
 extern crate spider;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
 
-use crate::spider::http_cache_reqwest::CacheManager;
 use crate::spider::tokio::io::AsyncWriteExt;
 use spider::features::chrome_common::RequestInterceptConfiguration;
-use spider::string_concat::{string_concat, string_concat_impl};
 use spider::tokio;
 use spider::website::Website;
 use spider_transformations::transformation::content;
 
 static GLOBAL_URL_COUNT: AtomicUsize = AtomicUsize::new(0);
 
+// Implement a crawler that do these thing in order
+// 1. Craw the sitemap first
+// 2. Loop the link and parse from html to markdown
+// And able to do all of those by auto determine whether to use
+// HTTP request or Chrome headless rendering based on whether
+// the website is SSR or SPA
 #[tokio::main]
 async fn main() {
     let target = "https://www.heygoody.com/";
-    // let target = "https://rsseau.fr/en";
-    // // let target = "https://facebook.com";
-    // // let target = "https://jeffmendez.com";
-    let mut website = Website::new(target);
-
-    website
+    let mut website = Website::new(target)
         .with_respect_robots_txt(false)
         .with_user_agent(Some("SpiderBot"))
-        .with_ignore_sitemap(true) // ignore running the sitemap on base crawl/scape methods. Remove or set to true to include the sitemap with the crawl.
-        .with_sitemap(Some("/sitemap/sitemap-0.xml"))
-        .with_caching(true)
+        // .with_ignore_sitemap(true) // ignore running the sitemap on base crawl/scape methods. Remove or set to true to include the sitemap with the crawl.
+        .with_sitemap(Some("sitemap.xml"))
         .with_chrome_intercept(RequestInterceptConfiguration::new(true))
+        .with_depth(10)
+        .with_limit(100)
         .with_stealth(true)
-        .with_depth(50)
-        .with_limit(500);
+        .build()
+        .unwrap();
 
     let start = std::time::Instant::now();
 
+    // first and foremost, we crawl the sitemap
     website.crawl_sitemap_chrome().await;
 
     let mut rx2 = website.subscribe(500).unwrap();
@@ -41,33 +41,15 @@ async fn main() {
     let subscription = async move {
         while let Ok(res) = rx2.recv().await {
             let mut stdout = tokio::io::stdout();
-            let cache_url = string_concat!("GET:", res.get_url());
 
             tokio::task::spawn(async move {
-                let link = res.get_url();
-                let result = tokio::time::timeout(Duration::from_millis(60), async {
-                    spider::website::CACACHE_MANAGER.get(&cache_url).await
-                })
-                .await;
-
                 let _ = stdout.write_all(b"\n\n#### ==== ####\n").await;
-                match result {
-                    Ok(Ok(Some(_cache))) => {
-                        let message = format!("HIT - {:?}\n", cache_url);
-                        let _ = stdout.write_all(message.as_bytes()).await;
-                    }
-                    Ok(Ok(None)) | Ok(Err(_)) => {
-                        let message = format!("MISS - {:?}\n", cache_url);
-                        let _ = stdout.write_all(message.as_bytes()).await;
-                    }
-                    Err(_) => {
-                        let message = format!("ERROR - {:?}\n", cache_url);
-                        let _ = stdout.write_all(message.as_bytes()).await;
-                    }
-                };
+
+                let _ = stdout.write_all(res.get_url().as_bytes()).await;
 
                 // get html and parse it into markdown
-                let markdown = parse_markdown(&res.get_html());
+                let markdown = parse_html_to_markdown(&res.get_html());
+
                 let _ = stdout.write_all(markdown.as_bytes()).await;
 
                 GLOBAL_URL_COUNT.fetch_add(1, Ordering::Relaxed);
@@ -76,6 +58,11 @@ async fn main() {
     };
 
     let crawl = async move {
+        // crawl_smart state that it will use http first, and if applicable `javascript` rendering
+        // is used if need.
+        // what I understand is that it able to determine whether to use http request or chrome for
+        // headless rendering. What I think will applied is it will use http request if website is SSR
+        // and use chrome if it's SPA.
         website.crawl_smart().await;
         website.unsubscribe();
     };
@@ -95,8 +82,8 @@ async fn main() {
     )
 }
 
-fn parse_markdown(html: &String) -> String {
-    // let markdown = html2md::rewrite_html(&res.get_html(), false);
-    let markdown = content::transform_markdown(html, false);
-    markdown
+fn parse_html_to_markdown(html: &String) -> String {
+    // use transform_markdown which is a sub-crate within the spider-rs, to transform html elements
+    // into markdown text.
+    content::transform_markdown(html, false)
 }
