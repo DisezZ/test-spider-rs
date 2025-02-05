@@ -1,9 +1,13 @@
 extern crate spider;
 
+use core::str;
+use std::collections::HashSet;
+use std::ops::Deref;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::spider::tokio::io::AsyncWriteExt;
 use spider::features::chrome_common::RequestInterceptConfiguration;
+use spider::serde::Deserialize;
 use spider::website::Website;
 use spider::{reqwest, tokio};
 use spider_transformations::transformation::content;
@@ -16,10 +20,19 @@ enum WebsiteType {
     SPA,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Copy, Clone)]
 enum CrawlerMode {
     HTTPReq,
     Chrome,
+}
+
+struct Crawler {
+    target: String,
+    mode: CrawlerMode,
+}
+
+impl Crawler {
+    fn crawl() {}
 }
 
 // Implement a crawler that do these thing in order
@@ -36,6 +49,23 @@ async fn main() {
         WebsiteType::SPA => CrawlerMode::Chrome,
     };
     println!("DEBUG: Crawler operate in {:?} mode", crawler_mode);
+
+    let crawler = Crawler {
+        target: target.to_string(),
+        mode: crawler_mode,
+    };
+
+    let sitemaps = get_sitemaps(crawler).await;
+    println!("{:?}", sitemaps);
+
+    let url_links = get_links_from_sitemaps(sitemaps.unwrap()).await;
+    // let hash: HashSet<String> = HashSet::from_iter(url_links.iter().cloned());
+    // let url_links: Vec<String> = hash.into_iter().collect();
+    for (i, link) in url_links.iter().enumerate() {
+        println!("{} - {}", i + 1, link);
+    }
+    println!("Got total {} links", url_links.len());
+    return;
 
     // construct website struct based on crawler mode
     let mut binding = Website::new(target);
@@ -103,6 +133,124 @@ async fn main() {
         "Time elapsed in website.crawl() is: {:?} for total pages: {:?}",
         duration, GLOBAL_URL_COUNT
     )
+}
+
+async fn get_sitemaps(crawler: Crawler) -> Option<Vec<String>> {
+    let robots_path = crawler.target + "robots.txt";
+    let res = reqwest::get(robots_path).await.unwrap();
+    let robots_txt = res.text().await.unwrap();
+    let sitemaps = robots_txt
+        .lines()
+        .filter(|line| line.contains("Sitemap: "))
+        .map(|line| line.split_ascii_whitespace().last().map(str::to_string))
+        .flatten()
+        .collect::<Vec<_>>();
+    match !sitemaps.is_empty() {
+        true => Some(sitemaps),
+        false => None,
+    }
+}
+
+// indicate state of reading xml
+//  whether we currently at sitemap index or sitemap entry
+enum SitemapXMLState {
+    SitemapIndex,
+    SitemapEntry,
+    Other,
+}
+
+use spider::quick_xml::{de, events::Event, Reader};
+async fn get_links_from_sitemaps(sitemaps: Vec<String>) -> Vec<String> {
+    let mut url_links: Vec<String> = vec![];
+    for sitemap in sitemaps {
+        let mut state = SitemapXMLState::Other;
+        let mut to_read = false;
+        let xml = reqwest::get(&sitemap).await.unwrap().text().await.unwrap();
+        let mut reader = Reader::from_str(xml.as_ref());
+        reader.config_mut().trim_text(true);
+
+        // let mut buf = Vec::new();
+        loop {
+            match reader.read_event().unwrap() {
+                Event::Eof => break,
+                Event::Start(e) => {
+                    let name = str::from_utf8(&e).unwrap();
+                    // println!("Start: {:?}", &name);
+                    match name.as_ref() {
+                        "url" => state = SitemapXMLState::SitemapEntry,
+                        "sitemap" => state = SitemapXMLState::SitemapIndex,
+                        "loc" => to_read = true,
+                        _ => state = SitemapXMLState::Other,
+                    }
+                }
+                Event::Text(e) => {
+                    let text = String::from_utf8(e.as_ref().into()).unwrap();
+                    // println!("Text: {:?}", &text);
+                    match (&state, &to_read) {
+                        (SitemapXMLState::SitemapIndex, true) => {
+                            let mut urls = process_sitemap_index(&text.to_string()).await;
+                            url_links.append(&mut urls);
+                            to_read = false;
+                        }
+                        (SitemapXMLState::SitemapEntry, true) => {
+                            url_links.push(text);
+                            to_read = false;
+                        }
+                        _ => (),
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    url_links
+}
+
+async fn process_sitemap_index(sitemap_index: &str) -> Vec<String> {
+    let mut url_links = vec![];
+    let mut state = SitemapXMLState::Other;
+    let mut to_read = false;
+    let xml = reqwest::get(sitemap_index)
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    let mut reader = Reader::from_str(xml.as_ref());
+    reader.config_mut().trim_text(true);
+
+    // let mut buf = Vec::new();
+    loop {
+        match reader.read_event().unwrap() {
+            Event::Eof => break,
+            Event::Start(e) => {
+                let name = str::from_utf8(&e).unwrap();
+                // println!("Start: {:?}", &name);
+                match name.as_ref() {
+                    "url" => state = SitemapXMLState::SitemapEntry,
+                    "loc" => to_read = true,
+                    _ => state = SitemapXMLState::Other,
+                }
+            }
+            Event::Text(e) => {
+                let text = String::from_utf8(e.as_ref().into()).unwrap();
+                // println!("Text: {:?}", &text);
+                match (&state, &to_read) {
+                    (SitemapXMLState::SitemapEntry, true) => {
+                        url_links.push(text);
+                        to_read = false;
+                    }
+                    _ => (),
+                }
+            }
+            _ => {}
+        }
+    }
+    url_links
+}
+
+async fn process_sitemap_entry(sitemap_entry: &String) -> Vec<String> {
+    vec![]
 }
 
 // simple func to determine whtether a website is SSR or SPA, currently based on a simple
