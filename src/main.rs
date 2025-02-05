@@ -63,18 +63,60 @@ impl Crawler {
     }
 
     async fn crawl_with_sitemaps(&self, sitemaps: Vec<String>) {
+        let mut binding = Website::new(self.target.as_str());
+        let website = binding
+            .with_respect_robots_txt(true)
+            .with_user_agent(Some("SpiderBot"))
+            .with_stealth(true);
+
+        // update config based on crawler mode
+        match self.mode {
+            CrawlerMode::HTTPReq => {}
+            CrawlerMode::Chrome => {
+                website.with_chrome_intercept(RequestInterceptConfiguration::new(true));
+            }
+        };
+
+        // crawl only for each sitemap
+        for sitemap in &sitemaps {
+            // get sitemap path eg. "/sitemap.xml"
+            let sitemap_path =
+                "/".to_string() + sitemap.split(self.target.as_str()).collect::<Vec<_>>()[1];
+            let sitemap_path = sitemap_path.as_str();
+
+            // set crawler to use current sitemap
+            website.with_sitemap(Some(sitemap_path)).build().unwrap();
+
+            // crawl sitemap only
+            website.crawl_sitemap().await;
+
+            // persist visited link for next crawl
+            website.persist_links();
+        }
+
+        // get all visited links
+        let links = website.get_all_links_visited().await;
+
+        // we iterate each link and get html ==parse==> markdown
         let mut stdout = tokio::io::stdout();
-        let urls = get_sitemap_entry_links_from_sitemaps_robots(sitemaps).await;
-        for (i, url) in urls.iter().enumerate() {
+        for link in links {
             let _ = stdout.write_all(b"\n\n#### ==== ####\n").await;
-            let html = reqwest::get(url).await.unwrap().text().await.unwrap();
+            let html = reqwest::get(link.to_string())
+                .await
+                .unwrap()
+                .text()
+                .await
+                .unwrap();
             let _ = stdout
-                .write_all(format!("{:?} => {}\n", i, &url).as_bytes())
+                .write_all(format!("{:?} => {}\n", GLOBAL_URL_COUNT, &link).as_bytes())
                 .await;
 
             // get html and parse it into markdown
             let markdown = parse_html_to_markdown(&html);
             let _ = stdout.write_all(format!("{}\n", markdown).as_bytes()).await;
+
+            // increment links encounter count
+            GLOBAL_URL_COUNT.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -84,13 +126,15 @@ impl Crawler {
             .with_respect_robots_txt(true)
             .with_user_agent(Some("SpiderBot"))
             .with_stealth(true);
-        let website = match self.mode {
-            CrawlerMode::HTTPReq => website,
+
+        // update config based on crawler mode
+        match self.mode {
+            CrawlerMode::HTTPReq => (),
             CrawlerMode::Chrome => {
-                website.with_chrome_intercept(RequestInterceptConfiguration::new(true))
+                website.with_chrome_intercept(RequestInterceptConfiguration::new(true));
             }
         };
-        let mut website = website.build().unwrap();
+        website.build().unwrap();
 
         // first and foremost, we crawl the sitemap
         website.crawl_sitemap_chrome().await;
@@ -157,107 +201,6 @@ async fn main() {
         "Time elapsed in website.crawl() is: {:?} for total pages: {:?}",
         duration, GLOBAL_URL_COUNT
     )
-}
-
-// indicate state of reading xml
-//  whether we currently at sitemap index or sitemap entry
-enum SitemapXMLState {
-    SitemapIndex,
-    SitemapEntry,
-    Other,
-}
-
-use spider::quick_xml::{events::Event, Reader};
-async fn get_sitemap_entry_links_from_sitemaps_robots(sitemaps: Vec<String>) -> Vec<String> {
-    let mut sitemap_entry_links: Vec<String> = sitemaps.clone();
-    let mut to_remove = vec![];
-    for (i, sitemap) in sitemaps.iter().enumerate() {
-        let mut state = SitemapXMLState::Other;
-        let mut to_read = false;
-        let xml = reqwest::get(sitemap).await.unwrap().text().await.unwrap();
-        let mut reader = Reader::from_str(xml.as_ref());
-        reader.config_mut().trim_text(true);
-
-        // let mut buf = Vec::new();
-        loop {
-            match reader.read_event().unwrap() {
-                Event::Eof => break,
-                Event::Start(e) => {
-                    let name = str::from_utf8(&e).unwrap();
-                    // println!("Start: {:?}", &name);
-                    match name.as_ref() {
-                        "url" => state = SitemapXMLState::SitemapEntry,
-                        "sitemap" => state = SitemapXMLState::SitemapIndex,
-                        "loc" => to_read = true,
-                        _ => state = SitemapXMLState::Other,
-                    }
-                }
-                Event::Text(e) => {
-                    let text = String::from_utf8(e.as_ref().into()).unwrap();
-                    // println!("Text: {:?}", &text);
-                    match (&state, &to_read) {
-                        (SitemapXMLState::SitemapIndex, true) => {
-                            // let mut urls = process_sitemap_index(&text.to_string()).await;
-                            // sitemap_entry_links.append(&mut urls);
-                            sitemap_entry_links.push(text);
-                            to_remove.push(i);
-                            to_read = false;
-                        }
-                        (SitemapXMLState::SitemapEntry, true) => {
-                            // sitemap_entry_links.push(text);
-                            to_read = false;
-                        }
-                        _ => (),
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-    sitemap_entry_links
-}
-
-async fn process_sitemap_index(sitemap_index: &str) -> Vec<String> {
-    let mut url_links = vec![];
-    let mut state = SitemapXMLState::Other;
-    let mut to_read = false;
-    let xml = reqwest::get(sitemap_index)
-        .await
-        .unwrap()
-        .text()
-        .await
-        .unwrap();
-    let mut reader = Reader::from_str(xml.as_ref());
-    reader.config_mut().trim_text(true);
-
-    // let mut buf = Vec::new();
-    loop {
-        match reader.read_event().unwrap() {
-            Event::Eof => break,
-            Event::Start(e) => {
-                let name = str::from_utf8(&e).unwrap();
-                // println!("Start: {:?}", &name);
-                match name.as_ref() {
-                    "url" => state = SitemapXMLState::SitemapEntry,
-                    "loc" => to_read = true,
-                    _ => state = SitemapXMLState::Other,
-                }
-            }
-            Event::Text(e) => {
-                let text = String::from_utf8(e.as_ref().into()).unwrap();
-                // println!("Text: {:?}", &text);
-                match (&state, &to_read) {
-                    (SitemapXMLState::SitemapEntry, true) => {
-                        url_links.push(text);
-                        to_read = false;
-                    }
-                    _ => (),
-                }
-            }
-            _ => {}
-        }
-    }
-    url_links
 }
 
 // simple func to determine whtether a website is SSR or SPA, currently based on a simple
