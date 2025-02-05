@@ -64,7 +64,7 @@ impl Crawler {
 
     async fn crawl_with_sitemaps(&self, sitemaps: Vec<String>) {
         let mut stdout = tokio::io::stdout();
-        let urls = get_links_from_sitemaps(sitemaps).await;
+        let urls = get_sitemap_entry_links_from_sitemaps_robots(sitemaps).await;
         for (i, url) in urls.iter().enumerate() {
             let _ = stdout.write_all(b"\n\n#### ==== ####\n").await;
             let html = reqwest::get(url).await.unwrap().text().await.unwrap();
@@ -168,12 +168,13 @@ enum SitemapXMLState {
 }
 
 use spider::quick_xml::{events::Event, Reader};
-async fn get_links_from_sitemaps(sitemaps: Vec<String>) -> Vec<String> {
-    let mut url_links: Vec<String> = vec![];
-    for sitemap in sitemaps {
+async fn get_sitemap_entry_links_from_sitemaps_robots(sitemaps: Vec<String>) -> Vec<String> {
+    let mut sitemap_entry_links: Vec<String> = sitemaps.clone();
+    let mut to_remove = vec![];
+    for (i, sitemap) in sitemaps.iter().enumerate() {
         let mut state = SitemapXMLState::Other;
         let mut to_read = false;
-        let xml = reqwest::get(&sitemap).await.unwrap().text().await.unwrap();
+        let xml = reqwest::get(sitemap).await.unwrap().text().await.unwrap();
         let mut reader = Reader::from_str(xml.as_ref());
         reader.config_mut().trim_text(true);
 
@@ -196,12 +197,14 @@ async fn get_links_from_sitemaps(sitemaps: Vec<String>) -> Vec<String> {
                     // println!("Text: {:?}", &text);
                     match (&state, &to_read) {
                         (SitemapXMLState::SitemapIndex, true) => {
-                            let mut urls = process_sitemap_index(&text.to_string()).await;
-                            url_links.append(&mut urls);
+                            // let mut urls = process_sitemap_index(&text.to_string()).await;
+                            // sitemap_entry_links.append(&mut urls);
+                            sitemap_entry_links.push(text);
+                            to_remove.push(i);
                             to_read = false;
                         }
                         (SitemapXMLState::SitemapEntry, true) => {
-                            url_links.push(text);
+                            // sitemap_entry_links.push(text);
                             to_read = false;
                         }
                         _ => (),
@@ -211,7 +214,7 @@ async fn get_links_from_sitemaps(sitemaps: Vec<String>) -> Vec<String> {
             }
         }
     }
-    url_links
+    sitemap_entry_links
 }
 
 async fn process_sitemap_index(sitemap_index: &str) -> Vec<String> {
