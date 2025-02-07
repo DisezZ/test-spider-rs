@@ -40,11 +40,6 @@ impl Crawler {
 
     async fn start(&self) {
         let robot_sitemaps = self.get_sitemaps_from_robots().await;
-        println!(
-            "DEBUG: Sitemap From Robots.txt - {:?} {}",
-            robot_sitemaps,
-            robot_sitemaps.as_ref().unwrap().len()
-        );
         match robot_sitemaps {
             Some(sitemaps) => self.crawl_with_sitemaps(sitemaps).await,
             None => self.crawl_without_sitemaps().await,
@@ -68,6 +63,11 @@ impl Crawler {
     }
 
     async fn crawl_with_sitemaps(&self, sitemaps: Vec<String>) {
+        println!(
+            "DEBUG: Sitemap From Robots.txt - {:?} {}",
+            sitemaps,
+            sitemaps.len()
+        );
         let sitemap_entries = get_sitemaps_from_robots_sitemap(sitemaps.clone()).await;
         println!(
             "DEBUG: Sitemap Entries - {:?} {}",
@@ -138,56 +138,43 @@ impl Crawler {
 
         // update config based on crawler mode
         match self.mode {
-            CrawlerMode::HTTPReq => (),
+            CrawlerMode::HTTPReq => {}
             CrawlerMode::Chrome => {
                 website.with_chrome_intercept(RequestInterceptConfiguration::new(true));
             }
         };
+
         website.build().unwrap();
 
-        // first and foremost, we crawl the sitemap
-        website.crawl_sitemap_chrome().await;
+        // crawl sitemap only
+        website.crawl_sitemap().await;
 
-        let mut rx2 = website.subscribe(500).unwrap();
+        // get all visited links
+        let links = website.get_all_links_visited().await;
 
-        let subscription = async move {
-            while let Ok(res) = rx2.recv().await {
-                let mut stdout = tokio::io::stdout();
+        println!("links: {:?}", links);
 
-                tokio::task::spawn(async move {
-                    let _ = stdout.write_all(b"\n\n#### ==== ####\n").await;
+        // we iterate each link and get html ==parse==> markdown
+        let mut stdout = tokio::io::stdout();
+        for link in links {
+            let _ = stdout.write_all(b"\n\n#### ==== ####\n").await;
+            let html = reqwest::get(link.to_string())
+                .await
+                .unwrap()
+                .text()
+                .await
+                .unwrap();
+            let _ = stdout
+                .write_all(format!("{:?} => {}\n", GLOBAL_URL_COUNT, &link).as_bytes())
+                .await;
 
-                    let _ = stdout
-                        .write_all(
-                            format!("{:?} => {}\n", GLOBAL_URL_COUNT, res.get_url()).as_bytes(),
-                        )
-                        .await;
+            // get html and parse it into markdown
+            let markdown = parse_html_to_markdown(&html);
+            let _ = stdout.write_all(format!("{}\n", markdown).as_bytes()).await;
 
-                    // get html and parse it into markdown
-                    let markdown = parse_html_to_markdown(&res.get_html());
-                    let _ = stdout.write_all(format!("{}\n", markdown).as_bytes()).await;
-
-                    GLOBAL_URL_COUNT.fetch_add(1, Ordering::Relaxed);
-                });
-            }
-        };
-
-        let crawl = async move {
-            // crawl_smart state that it will use http first, and if applicable `javascript` rendering
-            // is used if need.
-            // what I understand is that it able to determine whether to use http request or chrome for
-            // headless rendering. What I think will applied is it will use http request if website is SSR
-            // and use chrome if it's SPA.
-            website.crawl_smart().await;
-            website.unsubscribe();
-        };
-
-        tokio::pin!(subscription);
-
-        tokio::select! {
-            _ = crawl => (),
-            _ = subscription => (),
-        };
+            // increment links encounter count
+            GLOBAL_URL_COUNT.fetch_add(1, Ordering::Relaxed);
+        }
     }
 }
 // Implement a crawler that do these thing in order
