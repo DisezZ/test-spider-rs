@@ -90,7 +90,7 @@ impl Crawler {
         };
 
         // crawl only for each sitemap
-        for sitemap in &sitemaps {
+        for sitemap in &sitemap_entries {
             // get sitemap path eg. "/sitemap.xml"
             let sitemap_path =
                 "/".to_string() + sitemap.split(self.target.as_str()).collect::<Vec<_>>()[1];
@@ -126,9 +126,6 @@ impl Crawler {
                 // increment links encounter count
                 GLOBAL_URL_COUNT.fetch_add(1, Ordering::Relaxed);
             }
-
-            // // persist visited link for next crawl
-            // website.persist_links();
         }
     }
 
