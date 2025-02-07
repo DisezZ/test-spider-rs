@@ -1,6 +1,7 @@
 extern crate spider;
 
 use core::str;
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::spider::tokio::io::AsyncWriteExt;
@@ -38,15 +39,19 @@ impl Crawler {
     }
 
     async fn start(&self) {
-        let sitemaps = self.get_sitemaps().await;
-        println!("{:?}", sitemaps);
-        match sitemaps {
+        let robot_sitemaps = self.get_sitemaps_from_robots().await;
+        println!(
+            "DEBUG: Sitemap From Robots.txt - {:?} {}",
+            robot_sitemaps,
+            robot_sitemaps.as_ref().unwrap().len()
+        );
+        match robot_sitemaps {
             Some(sitemaps) => self.crawl_with_sitemaps(sitemaps).await,
             None => self.crawl_without_sitemaps().await,
         };
     }
 
-    async fn get_sitemaps(&self) -> Option<Vec<String>> {
+    async fn get_sitemaps_from_robots(&self) -> Option<Vec<String>> {
         let robots_path = self.target.clone() + "robots.txt";
         let res = reqwest::get(robots_path).await.unwrap();
         let robots_txt = res.text().await.unwrap();
@@ -63,6 +68,13 @@ impl Crawler {
     }
 
     async fn crawl_with_sitemaps(&self, sitemaps: Vec<String>) {
+        let sitemap_entries = get_sitemaps_from_robots_sitemap(sitemaps.clone()).await;
+        println!(
+            "DEBUG: Sitemap Entries - {:?} {}",
+            sitemap_entries,
+            sitemap_entries.len()
+        );
+
         let mut binding = Website::new(self.target.as_str());
         let website = binding
             .with_respect_robots_txt(true)
@@ -90,33 +102,33 @@ impl Crawler {
             // crawl sitemap only
             website.crawl_sitemap().await;
 
-            // persist visited link for next crawl
-            website.persist_links();
-        }
+            // get all visited links
+            let links = website.get_all_links_visited().await;
 
-        // get all visited links
-        let links = website.get_all_links_visited().await;
+            // we iterate each link and get html ==parse==> markdown
+            let mut stdout = tokio::io::stdout();
+            for link in links {
+                let _ = stdout.write_all(b"\n\n#### ==== ####\n").await;
+                let html = reqwest::get(link.to_string())
+                    .await
+                    .unwrap()
+                    .text()
+                    .await
+                    .unwrap();
+                let _ = stdout
+                    .write_all(format!("{:?} => {}\n", GLOBAL_URL_COUNT, &link).as_bytes())
+                    .await;
 
-        // we iterate each link and get html ==parse==> markdown
-        let mut stdout = tokio::io::stdout();
-        for link in links {
-            let _ = stdout.write_all(b"\n\n#### ==== ####\n").await;
-            let html = reqwest::get(link.to_string())
-                .await
-                .unwrap()
-                .text()
-                .await
-                .unwrap();
-            let _ = stdout
-                .write_all(format!("{:?} => {}\n", GLOBAL_URL_COUNT, &link).as_bytes())
-                .await;
+                // get html and parse it into markdown
+                let markdown = parse_html_to_markdown(&html);
+                let _ = stdout.write_all(format!("{}\n", markdown).as_bytes()).await;
 
-            // get html and parse it into markdown
-            let markdown = parse_html_to_markdown(&html);
-            let _ = stdout.write_all(format!("{}\n", markdown).as_bytes()).await;
+                // increment links encounter count
+                GLOBAL_URL_COUNT.fetch_add(1, Ordering::Relaxed);
+            }
 
-            // increment links encounter count
-            GLOBAL_URL_COUNT.fetch_add(1, Ordering::Relaxed);
+            // // persist visited link for next crawl
+            // website.persist_links();
         }
     }
 
@@ -222,4 +234,101 @@ fn parse_html_to_markdown(html: &String) -> String {
     // use transform_markdown which is a sub-crate within the spider-rs, to transform html elements
     // into markdown text.
     content::transform_markdown(html, false)
+}
+
+// indicate state of reading xml
+//  whether we currently at sitemap index or sitemap entry
+enum SitemapXMLState {
+    SitemapIndex,
+    SitemapEntry,
+    Other,
+}
+
+use spider::quick_xml::{events::Event, Reader};
+async fn get_sitemaps_from_robots_sitemap(sitemaps: Vec<String>) -> Vec<String> {
+    let mut sitemap_urls: HashSet<String> = HashSet::new();
+    for sitemap in sitemaps {
+        let mut state = SitemapXMLState::Other;
+        let mut to_read = false;
+        let xml = reqwest::get(&sitemap).await.unwrap().text().await.unwrap();
+        let mut reader = Reader::from_str(xml.as_ref());
+        reader.config_mut().trim_text(true);
+
+        loop {
+            match reader.read_event().unwrap() {
+                Event::Eof => break,
+                Event::Start(e) => {
+                    let name = e.name();
+                    let name = str::from_utf8(name.as_ref()).unwrap();
+                    match name.as_ref() {
+                        "urlset" => {
+                            sitemap_urls.insert(sitemap.clone());
+                        }
+                        "url" => state = SitemapXMLState::SitemapEntry,
+                        "sitemap" => state = SitemapXMLState::SitemapIndex,
+                        "loc" => to_read = true,
+                        _ => state = SitemapXMLState::Other,
+                    }
+                }
+                Event::Text(e) => {
+                    let text = String::from_utf8(e.as_ref().into()).unwrap();
+                    match (&state, &to_read) {
+                        (SitemapXMLState::SitemapIndex, true) => {
+                            sitemap_urls.insert(text.clone());
+                            to_read = false;
+                        }
+                        (SitemapXMLState::SitemapEntry, true) => {
+                            to_read = false;
+                        }
+                        _ => (),
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    sitemap_urls.into_iter().collect()
+}
+
+async fn get_url_entries_from_sitemap_entries(sitemap_entries: Vec<String>) -> Vec<String> {
+    let mut url_links = vec![];
+    for sitemap_entry in sitemap_entries {
+        let mut state = SitemapXMLState::Other;
+        let mut to_read = false;
+        let xml = reqwest::get(sitemap_entry)
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        let mut reader = Reader::from_str(xml.as_ref());
+        reader.config_mut().trim_text(true);
+
+        loop {
+            match reader.read_event().unwrap() {
+                Event::Eof => break,
+                Event::Start(e) => {
+                    let name = str::from_utf8(&e).unwrap();
+                    match name.as_ref() {
+                        "url" => state = SitemapXMLState::SitemapEntry,
+                        "loc" => to_read = true,
+                        _ => state = SitemapXMLState::Other,
+                    }
+                }
+                Event::Text(e) => {
+                    let text = String::from_utf8(e.as_ref().into()).unwrap();
+                    match (&state, &to_read) {
+                        (SitemapXMLState::SitemapEntry, true) => {
+                            url_links.push(text);
+                            to_read = false;
+                        }
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    url_links
 }
